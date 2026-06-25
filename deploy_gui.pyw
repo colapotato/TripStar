@@ -23,6 +23,24 @@ from tkinter import (
 )
 from datetime import datetime
 
+# ────────── Windows 隐藏窗口工具 ──────────
+if sys.platform == "win32":
+    _HIDE = subprocess.CREATE_NO_WINDOW
+else:
+    _HIDE = 0
+
+def _popen(cmd, **kwargs):
+    """始终隐藏控制台窗口的 Popen"""
+    kwargs.setdefault("creationflags", 0)
+    kwargs["creationflags"] |= _HIDE
+    return subprocess.Popen(cmd, **kwargs)
+
+def _run(cmd, **kwargs):
+    """始终隐藏控制台窗口的 subprocess.run"""
+    kwargs.setdefault("creationflags", 0)
+    kwargs["creationflags"] |= _HIDE
+    return subprocess.run(cmd, **kwargs)
+
 # ---------- 配置 ----------
 PROJECT_DIR = Path(__file__).resolve().parent
 BACKEND_DIR = PROJECT_DIR / "backend"
@@ -56,15 +74,18 @@ START_STEPS = [
 # 核心逻辑 — 步骤化的工作线程
 # ============================================================
 class DeployWorker:
-    def __init__(self, step_callback, log_callback):
+    def __init__(self, step_callback, log_callback, ask_callback=None):
         """
         step_callback(action, step_id, desc, detail='')
           action: 'start' | 'success' | 'fail' | 'skip'
         log_callback(msg, level)
           level: 'info' | 'ok' | 'warn' | 'error'
+        ask_callback(title, message) -> bool
+          在后台线程中询问用户是/否，返回 True/False
         """
         self.step_cb = step_callback
         self.log_cb = log_callback
+        self.ask_cb = ask_callback
         self._stop = threading.Event()
 
     def stop(self):
@@ -75,7 +96,7 @@ class DeployWorker:
         if self._stop.is_set():
             return False
         try:
-            proc = subprocess.Popen(
+            proc = _popen(
                 cmd,
                 cwd=str(cwd or PROJECT_DIR),
                 stdout=subprocess.PIPE,
@@ -100,9 +121,9 @@ class DeployWorker:
 
     def _which(self, name):
         if sys.platform == "win32":
-            r = subprocess.run(["where", name], capture_output=True, text=True)
+            r = _run(["where", name], capture_output=True, text=True)
         else:
-            r = subprocess.run(["which", name], capture_output=True, text=True)
+            r = _run(["which", name], capture_output=True, text=True)
         return r.stdout.strip() if r.returncode == 0 else None
 
     # ---------- 部署 ----------
@@ -337,10 +358,18 @@ class DeployWorker:
             self.step_cb("fail", "check_api_keys", "检查 API Key 配置",
                          "部分 Key 未配置，部分功能可能不可用")
 
-        # --- step 4: 启动后端 ---
+        # --- step 4: 启动后端 (带健康检查) ---
         self.step_cb("start", "start_backend", "启动后端服务")
         port = self._get_backend_port()
         self.log_cb(f"后端端口: {port}", "info")
+
+        # 检查端口是否被占用
+        port_status = self._check_port_or_ask(port, "后端")
+        if port_status == "cancelled":
+            self.step_cb("fail", "start_backend", "启动后端服务", "端口被占用，用户取消")
+            return False
+        be_skip = port_status == "ours"  # 自己的进程，跳过启动直接验证
+
         if sys.platform == "win32":
             venv_python = str(BACKEND_DIR / ".venv" / "Scripts" / "python.exe")
         else:
@@ -349,53 +378,135 @@ class DeployWorker:
             venv_python, "-m", "uvicorn", "app.api.main:app",
             "--host", "0.0.0.0", "--port", str(port), "--reload",
         ]
-        kwargs = {"cwd": str(BACKEND_DIR), "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
-        if sys.platform == "win32":
-            kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
-        try:
-            subprocess.Popen(backend_cmd, **kwargs)
-            self.log_cb("后端服务已启动", "ok")
-            self.step_cb("success", "start_backend", "启动后端服务")
-        except Exception as e:
-            self.log_cb(f"后端启动失败: {e}，正在重试...", "warn")
-            try:
-                subprocess.Popen(backend_cmd, **kwargs)
-                self.log_cb("后端服务已启动（重试成功）", "ok")
+
+        backend_url = f"http://localhost:{port}/docs"
+
+        if be_skip:
+            # 本项目自己的进程已在运行，直接验证
+            if self._health_check(backend_url):
+                self.log_cb("后端已在运行中 ✓", "ok")
                 self.step_cb("success", "start_backend", "启动后端服务")
-            except Exception as e2:
-                self.log_cb(f"后端启动重试仍然失败: {e2}", "error")
-                self.step_cb("fail", "start_backend", "启动后端服务", str(e2))
-                return False
+            else:
+                self.log_cb("后端进程存在但无法访问，尝试重新启动...", "warn")
+                be_skip = False  # 降级为重新启动
 
-        # 等待后端就绪
-        self.log_cb("等待后端就绪...", "info")
-        time.sleep(3)
-
-        # --- step 5: 启动前端 ---
-        self.step_cb("start", "start_frontend", "启动前端服务")
-        npm = "npm.cmd" if sys.platform == "win32" else "npm"
-        kwargs = {"cwd": str(FRONTEND_DIR), "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
-        if sys.platform == "win32":
-            kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
-        try:
-            subprocess.Popen([npm, "run", "dev"], **kwargs)
-            self.log_cb("前端服务已启动", "ok")
-            self.step_cb("success", "start_frontend", "启动前端服务")
-        except Exception as e:
-            self.log_cb(f"前端启动失败: {e}，正在重试...", "warn")
+        if not be_skip:
+            # 后端输出写入日志文件，便于排查
+            backend_log = PROJECT_DIR / "backend_startup.log"
+            kwargs = {"cwd": str(BACKEND_DIR),
+                      "stdout": open(backend_log, "w", encoding="utf-8"),
+                      "stderr": subprocess.STDOUT}
+            self._backend_proc = None
             try:
-                subprocess.Popen([npm, "run", "dev"], **kwargs)
-                self.log_cb("前端服务已启动（重试成功）", "ok")
+                self._backend_proc = _popen(backend_cmd, **kwargs)
+                self.log_cb("后端进程已启动，等待就绪...", "info")
+
+                # 健康检查：最多等 15 秒
+                for i in range(15):
+                    time.sleep(1)
+                    if self._health_check(backend_url):
+                        self.log_cb(f"后端服务已就绪 ✓ (耗时 {i+1}s)", "ok")
+                        self.step_cb("success", "start_backend", "启动后端服务")
+                        break
+                else:
+                    # 超时 — 检查进程是否已崩溃
+                    exit_code = self._backend_proc.poll()
+                    if exit_code is not None:
+                        self.log_cb(f"后端进程已退出 (退出码: {exit_code})", "error")
+                        self._show_log_tail(backend_log, "后端启动日志")
+                    else:
+                        self.log_cb("后端进程运行中但无法访问，可能启动较慢", "warn")
+                        self.log_cb("请稍后手动刷新页面", "warn")
+                    self.step_cb("fail", "start_backend", "启动后端服务", "服务未就绪")
+                    return False
+            except Exception as e:
+                self.log_cb(f"后端启动失败: {e}，正在重试...", "warn")
+                try:
+                    self._backend_proc = _popen(backend_cmd, **kwargs)
+                    time.sleep(5)
+                    if self._health_check(backend_url):
+                        self.log_cb("后端服务已就绪（重试成功）", "ok")
+                        self.step_cb("success", "start_backend", "启动后端服务")
+                    else:
+                        self.log_cb("后端服务重试后仍未就绪", "error")
+                        self.step_cb("fail", "start_backend", "启动后端服务", str(e))
+                        return False
+                except Exception as e2:
+                    self.log_cb(f"后端启动重试仍然失败: {e2}", "error")
+                    self.step_cb("fail", "start_backend", "启动后端服务", str(e2))
+                    return False
+
+        # --- step 5: 启动前端 (带健康检查) ---
+        self.step_cb("start", "start_frontend", "启动前端服务")
+
+        # 检查前端端口 5173 是否被占用
+        fe_status = self._check_port_or_ask(5173, "前端")
+        if fe_status == "cancelled":
+            self.step_cb("fail", "start_frontend", "启动前端服务", "端口被占用，用户取消")
+            return False
+
+        npm_cmd = "npm.cmd" if sys.platform == "win32" else "npm"
+        frontend_url = "http://localhost:5173"
+
+        fe_skip = fe_status == "ours"
+
+        if fe_skip:
+            if self._health_check(frontend_url):
+                self.log_cb("前端已在运行中 ✓", "ok")
                 self.step_cb("success", "start_frontend", "启动前端服务")
-            except Exception as e2:
-                self.log_cb(f"前端启动重试仍然失败: {e2}", "error")
-                self.step_cb("fail", "start_frontend", "启动前端服务", str(e2))
-                return False
+            else:
+                self.log_cb("前端进程存在但无法访问，尝试重新启动...", "warn")
+                fe_skip = False
+
+        if not fe_skip:
+            # 前端输出写入日志文件
+            frontend_log = PROJECT_DIR / "frontend_startup.log"
+            kwargs = {"cwd": str(FRONTEND_DIR),
+                      "stdout": open(frontend_log, "w", encoding="utf-8"),
+                      "stderr": subprocess.STDOUT}
+            self._frontend_proc = None
+            try:
+                self._frontend_proc = _popen([npm_cmd, "run", "dev"], **kwargs)
+                self.log_cb("前端进程已启动，等待就绪...", "info")
+
+                # 健康检查：最多等 20 秒 (Vite 首次启动较慢)
+                for i in range(20):
+                    time.sleep(1)
+                    if self._health_check(frontend_url):
+                        self.log_cb(f"前端服务已就绪 ✓ (耗时 {i+1}s)", "ok")
+                        self.step_cb("success", "start_frontend", "启动前端服务")
+                        break
+                else:
+                    exit_code = self._frontend_proc.poll()
+                    if exit_code is not None:
+                        self.log_cb(f"前端进程已退出 (退出码: {exit_code})", "error")
+                        self._show_log_tail(frontend_log, "前端启动日志")
+                    else:
+                        self.log_cb("前端进程运行中但无法访问，可能启动较慢", "warn")
+                        self.log_cb("请稍后手动刷新 http://localhost:5173", "warn")
+                    self.step_cb("fail", "start_frontend", "启动前端服务", "Vite 未就绪")
+                    return False
+            except Exception as e:
+                self.log_cb(f"前端启动失败: {e}，正在重试...", "warn")
+                try:
+                    self._frontend_proc = _popen([npm_cmd, "run", "dev"], **kwargs)
+                    time.sleep(10)
+                    if self._health_check(frontend_url):
+                        self.log_cb("前端服务已就绪（重试成功）", "ok")
+                        self.step_cb("success", "start_frontend", "启动前端服务")
+                    else:
+                        self.log_cb("前端服务重试后仍未就绪", "error")
+                        self.step_cb("fail", "start_frontend", "启动前端服务", str(e))
+                        return False
+                except Exception as e2:
+                    self.log_cb(f"前端启动重试仍然失败: {e2}", "error")
+                    self.step_cb("fail", "start_frontend", "启动前端服务", str(e2))
+                    return False
 
         # --- step 6: 记下端口，由 GUI 询问用户后决定是否打开浏览器 ---
         self.step_cb("start", "open_browser", "打开浏览器")
         self.log_cb(f"前端地址: http://localhost:5173", "ok")
-        self.log_cb(f"后端文档: http://localhost:{port}/docs", "info")
+        self.log_cb(f"后端文档: http://localhost:{port}/docs", "ok")
         # step 6 保持 running，GUI 在询问用户后决定 success / skip
         return ("started", port)
 
@@ -407,7 +518,7 @@ class DeployWorker:
             path = self._which(cmd)
             if path:
                 try:
-                    ver = subprocess.run([cmd, "--version"], capture_output=True, text=True, timeout=10)
+                    ver = _run([cmd, "--version"], capture_output=True, text=True, timeout=10)
                     self.log_cb(f"  ✓ {ver.stdout.strip() or ver.stderr.strip()}", "ok")
                     python_cmd = cmd
                     break
@@ -419,7 +530,7 @@ class DeployWorker:
 
         self.log_cb("检查 Node.js...", "info")
         if self._which("node"):
-            ver = subprocess.run(["node", "--version"], capture_output=True, text=True, timeout=10)
+            ver = _run(["node", "--version"], capture_output=True, text=True, timeout=10)
             self.log_cb(f"  ✓ Node.js {ver.stdout.strip()}", "ok")
         else:
             self.log_cb("  ✗ Node.js 未找到！请安装 Node.js 18+", "error")
@@ -525,9 +636,155 @@ class DeployWorker:
                 pass
         return 8000
 
+    def _find_process_by_port(self, port):
+        """查找占用端口的进程，返回 (pid, 名称, 是否为本项目进程) 或 None"""
+        try:
+            if sys.platform == "win32":
+                r = _run(
+                    ["netstat", "-ano", "-p", "TCP"],
+                    capture_output=True, text=True, timeout=15
+                )
+                for line in r.stdout.splitlines():
+                    parts = line.strip().split()
+                    if len(parts) >= 5 and f":{port}" in parts[1] and "LISTENING" in parts[3]:
+                        pid = parts[4]
+                        # 获取进程名称
+                        tr = _run(["tasklist", "/FI", f"PID eq {pid}", "/NH"],
+                                            capture_output=True, text=True, timeout=10)
+                        pname = "未知"
+                        for tl in tr.stdout.splitlines():
+                            tl = tl.strip()
+                            if tl and tl.lower() != "info:":
+                                pname = tl.split()[0] if tl.split() else "未知"
+                        # 判断是否为本项目进程
+                        is_ours = self._is_our_process(pid)
+                        return (pid, pname, is_ours)
+            else:
+                r = _run(
+                    ["lsof", "-i", f":{port}", "-sTCP:LISTEN", "-P", "-n"],
+                    capture_output=True, text=True, timeout=15
+                )
+                for line in r.stdout.splitlines()[1:]:
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        pid = parts[1]
+                        pname = parts[0]
+                        is_ours = self._is_our_process(pid)
+                        return (pid, pname, is_ours)
+        except Exception:
+            pass
+        return None
+
+    def _is_our_process(self, pid):
+        """检查进程是否为本项目启动的服务（根据命令行路径判断）"""
+        try:
+            cmdline = ""
+            if sys.platform == "win32":
+                r = _run(
+                    ["wmic", "process", "where", f"processid={pid}", "get", "commandline", "/format:list"],
+                    capture_output=True, text=True, timeout=10
+                )
+                for line in r.stdout.splitlines():
+                    if line.startswith("CommandLine="):
+                        cmdline = line[12:]
+                        break
+            else:
+                r = _run(
+                    ["ps", "-p", str(pid), "-o", "args="],
+                    capture_output=True, text=True, timeout=10
+                )
+                cmdline = r.stdout.strip()
+            # 检查命令行是否包含本项目路径
+            proj_str = str(PROJECT_DIR).lower()
+            return proj_str in cmdline.lower() if cmdline else False
+        except Exception:
+            return False
+
+    def _kill_port_process(self, port, pid):
+        """杀掉占用端口的进程"""
+        self.log_cb(f"正在终止进程 (PID: {pid})...", "warn")
+        try:
+            if sys.platform == "win32":
+                r = _run(["taskkill", "/F", "/PID", str(pid)],
+                                   capture_output=True, text=True, timeout=10)
+            else:
+                r = _run(["kill", "-9", str(pid)],
+                                   capture_output=True, text=True, timeout=10)
+            ok = r.returncode == 0
+            if ok:
+                self.log_cb(f"  已终止进程 (PID: {pid})", "ok")
+                time.sleep(1)
+            else:
+                self.log_cb(f"  终止失败: {r.stderr.strip()}", "error")
+            return ok
+        except Exception as e:
+            self.log_cb(f"  终止进程异常: {e}", "error")
+            return False
+
+    def _check_port_or_ask(self, port, label="服务"):
+        """检查端口是否被占用
+        返回: 'free' 空闲 | 'ours' 本项目进程 | 'killed' 已杀掉 | 'cancelled' 用户取消
+        """
+        info = self._find_process_by_port(port)
+        if info is None:
+            return "free"
+        pid, pname, is_ours = info
+
+        if is_ours:
+            self.log_cb(f"  ✓ 端口 {port} 已被本项目占用（跳过启动）", "ok")
+            return "ours"
+
+        self.log_cb(f"⚠ 端口 {port} 已被 {pname} (PID: {pid}) 占用", "warn")
+        if self.ask_cb:
+            msg = (
+                f"端口 {port} 已被占用\n\n"
+                f"占用程序: {pname}\n"
+                f"进程 PID: {pid}\n\n"
+                f"是否终止该进程以释放端口？"
+            )
+            if self.ask_cb("端口被占用", msg):
+                return "killed" if self._kill_port_process(port, pid) else "cancelled"
+            self.log_cb(f"用户取消 — {label}启动终止", "warn")
+            return "cancelled"
+        return "free"
+
     def _missing_hint(self, paths):
         missing = [p.name for p in paths if not p.exists()]
         return f"缺失: {', '.join(missing)}" if missing else "请先部署项目"
+
+    def _health_check(self, url, timeout=3):
+        """HTTP 健康检查 — 尝试 GET 指定 URL"""
+        import urllib.request
+        import urllib.error
+        try:
+            req = urllib.request.Request(url, method="HEAD")
+            urllib.request.urlopen(req, timeout=timeout)
+            return True
+        except Exception:
+            try:
+                urllib.request.urlopen(url, timeout=timeout)
+                return True
+            except Exception:
+                return False
+
+    def _show_log_tail(self, log_path, label="日志"):
+        """显示日志文件尾部内容（用于诊断启动失败）"""
+        path = Path(log_path)
+        if not path.exists():
+            self.log_cb(f"  {label}文件不存在", "warn")
+            return
+        try:
+            lines = path.read_text(encoding="utf-8").strip().splitlines()
+            # 只显示最后 10 行
+            tail = lines[-10:] if len(lines) > 10 else lines
+            if not tail:
+                self.log_cb(f"  {label}: (无内容)", "warn")
+                return
+            self.log_cb(f"  ── {label} (最后 {len(tail)} 行) ──", "error")
+            for line in tail:
+                self.log_cb(f"  | {line}", "error")
+        except Exception as e:
+            self.log_cb(f"  读取{label}失败: {e}", "warn")
 
 
 # ============================================================
@@ -768,6 +1025,31 @@ class DeployGUI:
                                       self._on_start)
         self.start_btn.pack(side=LEFT)
 
+        # === 前后端实时运行状态灯 ===
+        status_lamp_frame = Frame(btn_frame, bg=self.COLORS["bg"])
+        status_lamp_frame.pack(side=RIGHT)
+
+        Label(status_lamp_frame, text="  ", font=("Microsoft YaHei", 10),
+              fg=self.COLORS["text_dim"], bg=self.COLORS["bg"]).pack(side=LEFT)
+
+        # 后端状态灯
+        self._be_label = Label(status_lamp_frame, text="●", font=("Consolas", 12),
+                               fg="#444", bg=self.COLORS["bg"])
+        self._be_label.pack(side=LEFT, padx=(0, 2))
+        Label(status_lamp_frame, text="后端", font=("Microsoft YaHei", 9),
+              fg=self.COLORS["text_dim"], bg=self.COLORS["bg"]).pack(side=LEFT, padx=(0, 10))
+
+        # 前端状态灯
+        self._fe_label = Label(status_lamp_frame, text="●", font=("Consolas", 12),
+                               fg="#444", bg=self.COLORS["bg"])
+        self._fe_label.pack(side=LEFT, padx=(0, 2))
+        Label(status_lamp_frame, text="前端", font=("Microsoft YaHei", 9),
+              fg=self.COLORS["text_dim"], bg=self.COLORS["bg"]).pack(side=LEFT, padx=(0, 2))
+
+        # 监控控制
+        self._services_started = False
+        self._monitor_job = None
+
         # 底部状态标签 + 清空按钮
         bottom_bar = Frame(root, bg=self.COLORS["bg"])
         bottom_bar.pack(fill=X, padx=24, pady=(2, 0))
@@ -881,6 +1163,9 @@ class DeployGUI:
                 elif msg_type == "status":
                     text, level = data
                     self.set_status(text, level)
+                elif msg_type == "svc_status":
+                    be_alive, fe_alive = data
+                    self._update_service_indicators(be_alive, fe_alive)
         except queue.Empty:
             pass
         self.root.after(50, self._poll_queue)
@@ -923,10 +1208,14 @@ class DeployGUI:
         steps = DEPLOY_STEPS if mode == "deploy" else START_STEPS
         self._switch_to_steps(steps)
 
+        # 停止之前的状态灯监控
+        self.root.after(0, self._stop_service_monitor)
+
         def _run():
             worker = DeployWorker(
                 step_callback=self._step_cb_from_thread,
                 log_callback=self._log,
+                ask_callback=self._ask_from_worker,
             )
             if mode == "deploy":
                 success = worker.deploy()
@@ -944,6 +1233,8 @@ class DeployGUI:
                     port = result[1]
                     self._msg_queue.put(("status", (
                         "✅ 服务已启动！", "success")))
+                    # 启动实时运行状态监控
+                    self.root.after(0, self._start_service_monitor)
                     self.root.after(0, self._ask_browser, port)
                 else:
                     self._msg_queue.put(("status", (
@@ -951,6 +1242,19 @@ class DeployGUI:
             self.root.after(0, lambda: self._set_busy(False))
 
         threading.Thread(target=_run, daemon=True).start()
+
+    def _ask_from_worker(self, title, message):
+        """在后台线程中被调用 — 在主线程弹窗询问用户，返回 True/False"""
+        result_box = [False]
+        event = threading.Event()
+
+        def _show():
+            result_box[0] = messagebox.askyesno(title, message, icon="warning")
+            event.set()
+
+        self.root.after(0, _show)
+        event.wait()
+        return result_box[0]
 
     def _ask_browser(self, port):
         """询问是否启动浏览器"""
@@ -1028,6 +1332,64 @@ class DeployGUI:
         self.log_text.delete(1.0, END)
         self.log_text.config(state=DISABLED)
         self.set_status("日志已清空", "info")
+
+    # ────────── 前后端运行状态监控 ──────────
+    def _start_service_monitor(self):
+        """启动定时监控（每 6 秒检查一次前后端状态）"""
+        self._services_started = True
+        self._be_once_running = False   # 后端是否曾运行成功
+        self._fe_once_running = False   # 前端是否曾运行成功
+        self._poll_services()
+
+    def _stop_service_monitor(self):
+        """停止监控"""
+        self._services_started = False
+        if self._monitor_job:
+            try:
+                self.root.after_cancel(self._monitor_job)
+            except Exception:
+                pass
+            self._monitor_job = None
+        # 指示灯恢复灰色
+        self._be_label.config(fg="#444")
+        self._fe_label.config(fg="#444")
+
+    def _poll_services(self):
+        if not self._services_started:
+            return
+
+        def _check():
+            be_alive = self._http_ok("http://localhost:8000/docs")
+            fe_alive = self._http_ok("http://localhost:5173")
+            self._msg_queue.put(("svc_status", (be_alive, fe_alive)))
+
+        threading.Thread(target=_check, daemon=True).start()
+        self._monitor_job = self.root.after(6000, self._poll_services)
+
+    @staticmethod
+    def _http_ok(url):
+        """快速检查 URL 是否可访问（超时 2 秒）"""
+        import urllib.request
+        try:
+            urllib.request.urlopen(url, timeout=2)
+            return True
+        except Exception:
+            return False
+
+    def _update_service_indicators(self, be_alive, fe_alive):
+        """更新指示灯颜色"""
+        # 后端
+        if be_alive:
+            self._be_once_running = True
+            self._be_label.config(fg="#4caf50")  # 绿色
+        elif self._be_once_running:
+            self._be_label.config(fg="#f44336")  # 红色（曾运行但崩溃）
+        # 前端
+        if fe_alive:
+            self._fe_once_running = True
+            self._fe_label.config(fg="#4caf50")
+        elif self._fe_once_running:
+            self._fe_label.config(fg="#f44336")
 
     def run(self):
         self.root.mainloop()
