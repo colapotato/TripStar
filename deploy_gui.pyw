@@ -137,15 +137,36 @@ class DeployWorker:
             self.step_cb("skip", "create_venv", "创建 Python 虚拟环境", "已存在，跳过")
         else:
             self.log_cb("正在创建虚拟环境...", "info")
+            # 多级修复链：uv → python -m venv → virtualenv
+            ok = False
+
+            # 尝试 1: uv venv
             if use_uv:
-                ok = self._run_cmd(["uv", "venv", ".venv"], cwd=BACKEND_DIR, timeout=120)
-                if not ok:
-                    self.log_cb("uv venv 失败，回退到 python -m venv...", "warn")
-                    ok = self._run_cmd([python_cmd, "-m", "venv", ".venv"], cwd=BACKEND_DIR, timeout=120)
-            else:
-                ok = self._run_cmd([python_cmd, "-m", "venv", ".venv"], cwd=BACKEND_DIR, timeout=120)
+                self.log_cb("  尝试方式 1/3: uv venv .venv", "info")
+                ok = self._run_cmd(["uv", "venv", ".venv", "--clear"], cwd=BACKEND_DIR, timeout=120)
+
+            # 尝试 2: python -m venv
             if not ok:
-                self.step_cb("fail", "create_venv", "创建 Python 虚拟环境", "虚拟环境创建失败")
+                self.log_cb("  尝试方式 2/3: python -m venv", "warn")
+                ok = self._run_cmd([python_cmd, "-m", "venv", ".venv", "--clear"], cwd=BACKEND_DIR, timeout=120)
+
+            # 尝试 3: virtualenv（先 pip 安装）
+            if not ok:
+                self.log_cb("  尝试方式 3/3: 安装 virtualenv 并创建", "warn")
+                # 先用系统 python 安装 virtualenv
+                self._run_cmd([python_cmd, "-m", "pip", "install", "virtualenv", "--user"],
+                              cwd=BACKEND_DIR, timeout=120)
+                ok = self._run_cmd([python_cmd, "-m", "virtualenv", ".venv"],
+                                   cwd=BACKEND_DIR, timeout=120)
+
+            if not ok:
+                # 输出详细诊断信息帮助用户排查
+                self.log_cb("  ── 诊断信息 ──", "error")
+                self._run_cmd([python_cmd, "--version"], cwd=BACKEND_DIR, timeout=10)
+                self._run_cmd([python_cmd, "-c", "import venv; print('venv 模块可用')"],
+                              cwd=BACKEND_DIR, timeout=10)
+                self.step_cb("fail", "create_venv", "创建 Python 虚拟环境",
+                             "三种方式均失败，请尝试手动创建：python -m venv backend/.venv")
                 return False
             self.step_cb("success", "create_venv", "创建 Python 虚拟环境")
 
@@ -374,7 +395,14 @@ class DeployWorker:
         if use_uv:
             self.log_cb("  ✓ uv 已安装（将加速 Python 依赖安装）", "ok")
         else:
-            self.log_cb("  ○ uv 未安装（将使用 pip）", "warn")
+            self.log_cb("  ○ uv 未安装，正在自动安装...", "warn")
+            ok = self._run_cmd([python_cmd, "-m", "pip", "install", "uv", "--quiet"],
+                               cwd=BACKEND_DIR, timeout=120)
+            if ok:
+                self.log_cb("  ✓ uv 安装成功", "ok")
+                use_uv = True
+            else:
+                self.log_cb("  ○ uv 自动安装失败（将使用 pip 作为备选）", "warn")
 
         return True, python_cmd, use_uv
 
