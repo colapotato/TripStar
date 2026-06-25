@@ -462,9 +462,14 @@ class DeployWorker:
         if not fe_skip:
             # 前端输出写入日志文件
             frontend_log = PROJECT_DIR / "frontend_startup.log"
+            # 禁用颜色参数，防止 Node.js v24+ 自动传入 --color
+            fe_env = os.environ.copy()
+            fe_env["NO_COLOR"] = "1"
+            fe_env["FORCE_COLOR"] = "0"
             kwargs = {"cwd": str(FRONTEND_DIR),
                       "stdout": open(frontend_log, "w", encoding="utf-8"),
-                      "stderr": subprocess.STDOUT}
+                      "stderr": subprocess.STDOUT,
+                      "env": fe_env}
             self._frontend_proc = None
             try:
                 self._frontend_proc = _popen([npm_cmd, "run", "dev"], **kwargs)
