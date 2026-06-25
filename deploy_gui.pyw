@@ -380,7 +380,7 @@ class DeployWorker:
             "--host", "0.0.0.0", "--port", str(port), "--reload",
         ]
 
-        backend_url = f"http://localhost:{port}/docs"
+        backend_url = f"http://127.0.0.1:{port}/docs"   # 127.0.0.1 避免 IPv6 解析问题
 
         if be_skip:
             # 本项目自己的进程已在运行，直接验证
@@ -447,7 +447,7 @@ class DeployWorker:
             return False
 
         npm_cmd = "npm.cmd" if sys.platform == "win32" else "npm"
-        frontend_url = "http://localhost:5173"
+        frontend_url = "http://127.0.0.1:5173"   # 健康检查用 127.0.0.1 避免 IPv6 问题
 
         fe_skip = fe_status == "ours"
 
@@ -794,10 +794,16 @@ class DeployWorker:
         """从 Vite 启动日志中解析实际地址（端口被占用时 Vite 会递增端口）"""
         try:
             text = Path(log_path).read_text(encoding="utf-8")
-            m = re.search(r'Local:\s*(https?://[^\s]+)', text)
+            # 去除 ANSI 转义码 \x1b[...m
+            clean = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', text)
+            # 再尝试移除日志中残留的 [NNm 格式码
+            clean = re.sub(r'\[[0-9;]*m', '', clean)
+            # 匹配 Local: 地址行
+            m = re.search(r'Local:\s*(https?://[^\s]+)', clean)
             if m:
                 return m.group(1).rstrip("/")
-            m = re.search(r'localhost:(\d{4,5})', text)
+            # 备选：匹配 localhost:端口 模式
+            m = re.search(r'localhost:(\d{4,5})', clean)
             if m:
                 return f"http://localhost:{m.group(1)}"
         except Exception:
@@ -1086,7 +1092,7 @@ class DeployGUI:
         # 监控控制
         self._services_started = False
         self._monitor_job = None
-        self._fe_monitor_url = "http://localhost:5173"
+        self._fe_monitor_url = "http://127.0.0.1:5173"
 
         # 底部状态标签 + 清空按钮
         bottom_bar = Frame(root, bg=self.COLORS["bg"])
@@ -1397,7 +1403,7 @@ class DeployGUI:
             return
 
         def _check():
-            be_alive = self._http_ok("http://localhost:8000/docs")
+            be_alive = self._http_ok("http://127.0.0.1:8000/docs")
             fe_alive = self._http_ok(self._fe_monitor_url)
             self._msg_queue.put(("svc_status", (be_alive, fe_alive)))
 
