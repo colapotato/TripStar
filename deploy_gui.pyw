@@ -472,7 +472,7 @@ class DeployWorker:
                 # 健康检查：最多等 20 秒 (Vite 首次启动较慢)
                 for i in range(20):
                     time.sleep(1)
-                    if self._health_check(frontend_url):
+                    if self._health_check(frontend_url, timeout=2):
                         self.log_cb(f"前端服务已就绪 ✓ (耗时 {i+1}s)", "ok")
                         self.step_cb("success", "start_frontend", "启动前端服务")
                         break
@@ -482,7 +482,16 @@ class DeployWorker:
                         self.log_cb(f"前端进程已退出 (退出码: {exit_code})", "error")
                         self._show_log_tail(frontend_log, "前端启动日志")
                     else:
-                        self.log_cb("前端进程运行中但无法访问，可能启动较慢", "warn")
+                        # 显示 Vite 日志，帮助诊断
+                        self.log_cb("前端进程未退出，正在读取启动日志...", "info")
+                        self._show_log_tail(frontend_log, "Vite 启动日志")
+                        # 也检查 Vite 是否用了其他端口（5173被占用时自动+1）
+                        for alt_port in (5174, 5175, 5172):
+                            alt_url = f"http://localhost:{alt_port}"
+                            if self._health_check(alt_url, timeout=1):
+                                self.log_cb(f"⚠ Vite 可能运行在端口 {alt_port}", "warn")
+                                self.log_cb(f"   请访问: http://localhost:{alt_port}", "warn")
+                                break
                         self.log_cb("请稍后手动刷新 http://localhost:5173", "warn")
                     self.step_cb("fail", "start_frontend", "启动前端服务", "Vite 未就绪")
                     return False
@@ -752,7 +761,7 @@ class DeployWorker:
         missing = [p.name for p in paths if not p.exists()]
         return f"缺失: {', '.join(missing)}" if missing else "请先部署项目"
 
-    def _health_check(self, url, timeout=3):
+    def _health_check(self, url, timeout=2):
         """HTTP 健康检查 — 尝试 GET 指定 URL"""
         import urllib.request
         import urllib.error
