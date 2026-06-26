@@ -18,7 +18,7 @@ import shutil
 from pathlib import Path
 from tkinter import (
     Tk, Frame, Button, Text, END, NORMAL, DISABLED,
-    messagebox, scrolledtext, font, Label, Canvas,
+    messagebox, scrolledtext, font, Label, Canvas, PhotoImage,
     NW, BOTH, LEFT, RIGHT, X, Y, TOP, BOTTOM, SOLID, GROOVE
 )
 from datetime import datetime
@@ -848,14 +848,15 @@ class DeployWorker:
 class StepPanel(Frame):
     """带圆点指示器的步骤列表组件"""
     COLORS = {
-        "pending": "#555",
-        "running": "#4fc3f7",
-        "success": "#4caf50",
-        "fail":    "#f44336",
-        "skip":    "#888",
-        "bg":      "#12121f",
-        "text":    "#ccc",
-        "text_light": "#777",
+        "pending": "#9ca3af",
+        "running": "#3b82f6",
+        "success": "#10b981",
+        "fail":    "#ef4444",
+        "skip":    "#6b7280",
+        "bg":      "#faf6f0",
+        "text":    "#1f2937",
+        "text_light": "#6b7280",
+        "row_bg":  "#faf6f0",
     }
 
     def __init__(self, master, steps, **kwargs):
@@ -873,29 +874,30 @@ class StepPanel(Frame):
 
     def _build(self):
         for i, (step_id, desc) in enumerate(self._steps):
-            row = Frame(self, bg=self.COLORS["bg"])
-            row.pack(fill=X, pady=(0 if i == 0 else 2, 0))
+            row = Frame(self, bg=self.COLORS["row_bg"], highlightbackground="#e5e7eb",
+                        highlightthickness=1)
+            row.pack(fill=X, pady=(0, 4), padx=4)
             self._rows[step_id] = row
 
-            # 圆点指示器 Label
-            indicator = Label(row, text="○", font=("Consolas", 14),
-                              fg=self.COLORS["pending"], bg=self.COLORS["bg"],
+            # 圆点指示器
+            indicator = Label(row, text="○", font=("Segoe UI", 12),
+                              fg=self.COLORS["pending"], bg=self.COLORS["row_bg"],
                               width=2, anchor="center")
-            indicator.pack(side=LEFT, padx=(8, 4))
+            indicator.pack(side=LEFT, padx=(12, 6), pady=8)
             self._indicators[step_id] = indicator
 
-            # 步骤描述（文本可能变化）
+            # 步骤描述
             desc_label = Label(row, text=desc, font=("Microsoft YaHei", 10),
-                               fg=self.COLORS["text"], bg=self.COLORS["bg"],
+                               fg=self.COLORS["text"], bg=self.COLORS["row_bg"],
                                anchor="w")
-            desc_label.pack(side=LEFT, fill=X, expand=True)
+            desc_label.pack(side=LEFT, fill=X, expand=True, pady=8)
             self._desc_labels[step_id] = desc_label
 
-            # 详情文字（右侧，用于显示小提示）
+            # 详情文字（右侧）
             detail_label = Label(row, text="", font=("Microsoft YaHei", 8),
-                                 fg=self.COLORS["text_light"], bg=self.COLORS["bg"],
+                                 fg=self.COLORS["text_light"], bg=self.COLORS["row_bg"],
                                  anchor="e")
-            detail_label.pack(side=RIGHT, padx=(4, 8))
+            detail_label.pack(side=RIGHT, padx=(4, 12), pady=8)
             self._detail_labels[step_id] = detail_label
 
             self._status[step_id] = "pending"
@@ -988,32 +990,46 @@ class StepPanel(Frame):
 # ============================================================
 class DeployGUI:
     COLORS = {
-        "bg":        "#0f0f1a",
-        "panel_bg":  "#1a1a2e",
-        "accent":    "#16213e",
-        "text":      "#e0e0e0",
-        "text_dim":  "#888",
-        "deploy":    "#27ae60",
-        "deploy_h":  "#2ecc71",
-        "start":     "#2980b9",
-        "start_h":   "#3498db",
-        "danger":    "#e74c3c",
-        "log_bg":    "#0a0a14",
+        "bg":        "#f0f2f5",
+        "panel_bg":  "#ffffff",
+        "accent":    "#e8ecf1",
+        "accent2":   "#dce0e8",
+        "text":      "#1a1a2e",
+        "text_dim":  "#6b7280",
+        "deploy":    "#059669",
+        "deploy_h":  "#10b981",
+        "start":     "#2563eb",
+        "start_h":   "#3b82f6",
+        "danger":    "#dc2626",
+        "log_bg":    "#f8f9fb",
+        "border":    "#d1d5db",
+        "title_bg":  "#ffffff",
     }
 
     def __init__(self):
         self.root = Tk()
-        self.root.title("旅途星辰 TripStar — 部署与启动工具")
-        self.root.geometry("780x680")
-        self.root.minsize(680, 580)
-        self.root.configure(bg=self.COLORS["bg"])
+        self.root.title("TripStar — AI旅行智能体")
+        self.root.geometry("960x680")
+        self.root.minsize(800, 580)
+        self.root.configure(bg="#1a1a2e")
 
-        # 设置图标
+        # 加载应用图标
+        self._app_icon = None
+        self._bg_image = None
         try:
-            icon_path = PROJECT_DIR / "frontend" / "favicon.png"
+            from PIL import Image, ImageTk
+            # 图标
+            icon_path = PROJECT_DIR / "resources" / "图标.jpg"
             if icon_path.exists():
-                img = __import__("tkinter").PhotoImage(file=str(icon_path))
-                self.root.iconphoto(True, img)
+                pil_img = Image.open(icon_path).resize((38, 40), Image.LANCZOS)
+                self._app_icon = ImageTk.PhotoImage(pil_img)
+                self.root.iconphoto(True, self._app_icon)
+            # 背景图
+            bg_path = PROJECT_DIR / "resources" / "启动器背景图1.jpg"
+            if bg_path.exists():
+                pil_bg = Image.open(bg_path)
+                pil_bg = pil_bg.resize((960, 680), Image.LANCZOS)
+                self._bg_image = ImageTk.PhotoImage(pil_bg)
         except Exception:
             pass
 
@@ -1037,127 +1053,132 @@ class DeployGUI:
     # ---------- UI 构建 ----------
     def _build_ui(self):
         root = self.root
+        C = self.COLORS
 
-        # === 标题 ===
-        title_frame = Frame(root, bg=self.COLORS["bg"])
-        title_frame.pack(fill=X, padx=24, pady=(18, 4))
-        Label(title_frame, text="旅途星辰 TripStar",
-              font=("Microsoft YaHei", 20, "bold"),
-              fg="#e8e8ff", bg=self.COLORS["bg"]).pack(anchor="w")
-        Label(title_frame, text="一键部署与启动工具",
-              font=("Microsoft YaHei", 10),
-              fg=self.COLORS["text_dim"], bg=self.COLORS["bg"]).pack(anchor="w")
+        # ═══════ 背景画布（承载背景图 + 无背景框的标题文字）═══════
+        self._bg_canvas = Canvas(root, highlightthickness=0, bd=0)
+        self._bg_canvas.place(x=0, y=0, relwidth=1, relheight=1)
+        if self._bg_image:
+            self._bg_canvas.create_image(0, 0, anchor="nw", image=self._bg_image)
 
-        # === 步骤面板（由后续操作动态创建） ===
-        self.step_container = Frame(root, bg=self.COLORS["bg"])
-        self.step_container.pack(fill=BOTH, expand=True, padx=24, pady=(12, 0))
+        # 标题文字直接画在画布上（无背景框）
+        icon_x = 20
+        if self._app_icon:
+            self._bg_canvas.create_image(icon_x, 16, anchor="nw", image=self._app_icon)
+            icon_x = 72
+        self._bg_canvas.create_text(icon_x, 12, anchor="nw", text="TripStar",
+                                     font=("Microsoft YaHei", 28, "bold"),
+                                     fill="#2d2d2d")
+        self._bg_canvas.create_text(icon_x, 55, anchor="nw", text="AI旅行智能体",
+                                     font=("Microsoft YaHei", 12),
+                                     fill="#555555")
 
-        # 占位文字（初始状态）
+        # ═══════ 右侧：状态灯 + 部署 + 启动（无背景框，直接浮在背景图上）═══════
+        right_w = 300
+        right_x = 960 - right_w - 8
+        btn_cx = right_x + right_w // 2
+
+        # ── 状态灯：与部署按键左对齐，前后端挨近 ──
+        be_x = btn_cx - 80
+        self._be_dot = self._bg_canvas.create_text(be_x, 565, anchor="w",
+                    text="● 后端", font=("Microsoft YaHei", 10),
+                    fill="#ffffff")
+        self._fe_dot = self._bg_canvas.create_text(be_x + 65, 565, anchor="w",
+                    text="● 前端", font=("Microsoft YaHei", 10),
+                    fill="#ffffff")
+
+        # ── 按钮：直接放在根窗口上，无容器背景框 ──
+        self.deploy_btn = self._mkbtn(root, "  部署  ",
+                                       "#059669", "#10b981",
+                                       self._on_deploy, font_size=13, padx=40, pady=8)
+        self.deploy_btn.place(x=btn_cx - 80, y=588, width=160, height=38)
+
+        self.start_btn = self._mkbtn(root, "  启动  ",
+                                      "#2563eb", "#3b82f6",
+                                      self._on_start, font_size=13, padx=40, pady=8)
+        self.start_btn.place(x=btn_cx - 80, y=632, width=160, height=38)
+
+        # ── 执行流程面板（左下角，半透明乳白背景）──
+        left_x = 20
+        left_w = 340
+        # 用 Canvas 绘制半透明效果矩形（stipple 产生透感）
+        self._bg_canvas.create_rectangle(
+            left_x, 180, left_x + left_w, 540,
+            fill="#f8f4ee", stipple="gray25", outline="#d0cbc4", width=1
+        )
+        # 嵌入的 Frame 用相同浅色，与 stipple 矩形融合
+        self._panel_bg = "#faf6f0"
+        flow_outer = Frame(root, bg=self._panel_bg, highlightthickness=0)
+        flow_outer.place(x=left_x, y=180, width=left_w, height=360)
+
+        flow_inner = Frame(flow_outer, bg=self._panel_bg, padx=8, pady=6)
+        flow_inner.pack(fill=BOTH, expand=True)
+
+        Label(flow_inner, text="▎执行流程",
+              font=("Microsoft YaHei", 10, "bold"),
+              fg="#444", bg=self._panel_bg).pack(anchor="nw", padx=4, pady=(0, 4))
+
+        self.step_container = Frame(flow_inner, bg=self._panel_bg)
+        self.step_container.pack(fill=BOTH, expand=True)
+
         self.placeholder = Label(
             self.step_container,
-            text="点击下方按钮开始操作\n\n"
-                 "「🚀 部署项目」— 完整安装依赖与环境配置\n"
-                 "「▶  启动项目」— 检查部署状态并启动服务",
-            font=("Microsoft YaHei", 10),
-            fg=self.COLORS["text_dim"], bg=self.COLORS["bg"],
-            justify="center",
+            text="",
+            font=("Microsoft YaHei", 9),
+            fg="#666", bg=self._panel_bg,
+            justify="left",
         )
-        self.placeholder.pack(expand=True)
+        self.placeholder.pack(expand=True, padx=8, pady=10)
 
-        self.step_panel = None  # 后面动态创建
+        self.step_panel = None
 
-        # === 按钮栏 ===
-        btn_frame = Frame(root, bg=self.COLORS["bg"])
-        btn_frame.pack(fill=X, padx=24, pady=(8, 4))
-
-        self.deploy_btn = self._mkbtn(btn_frame, " 🚀  部署项目  ",
-                                       self.COLORS["deploy"], self.COLORS["deploy_h"],
-                                       self._on_deploy)
-        self.deploy_btn.pack(side=LEFT, padx=(0, 10))
-
-        self.start_btn = self._mkbtn(btn_frame, " ▶  启动项目  ",
-                                      self.COLORS["start"], self.COLORS["start_h"],
-                                      self._on_start)
-        self.start_btn.pack(side=LEFT)
-
-        # === 前后端实时运行状态灯 ===
-        status_lamp_frame = Frame(btn_frame, bg=self.COLORS["bg"])
-        status_lamp_frame.pack(side=RIGHT)
-
-        Label(status_lamp_frame, text="  ", font=("Microsoft YaHei", 10),
-              fg=self.COLORS["text_dim"], bg=self.COLORS["bg"]).pack(side=LEFT)
-
-        # 后端状态灯
-        self._be_label = Label(status_lamp_frame, text="●", font=("Consolas", 12),
-                               fg="#444", bg=self.COLORS["bg"])
-        self._be_label.pack(side=LEFT, padx=(0, 2))
-        Label(status_lamp_frame, text="后端", font=("Microsoft YaHei", 9),
-              fg=self.COLORS["text_dim"], bg=self.COLORS["bg"]).pack(side=LEFT, padx=(0, 10))
-
-        # 前端状态灯
-        self._fe_label = Label(status_lamp_frame, text="●", font=("Consolas", 12),
-                               fg="#444", bg=self.COLORS["bg"])
-        self._fe_label.pack(side=LEFT, padx=(0, 2))
-        Label(status_lamp_frame, text="前端", font=("Microsoft YaHei", 9),
-              fg=self.COLORS["text_dim"], bg=self.COLORS["bg"]).pack(side=LEFT, padx=(0, 2))
-
-        # 监控控制
-        self._services_started = False
-        self._monitor_job = None
-        self._fe_monitor_url = "http://127.0.0.1:5173"
-
-        # 底部状态标签 + 清空按钮
-        bottom_bar = Frame(root, bg=self.COLORS["bg"])
-        bottom_bar.pack(fill=X, padx=24, pady=(2, 0))
-
-        self.status_label = Label(
-            bottom_bar, text="就绪", font=("Microsoft YaHei", 9),
-            fg=self.COLORS["text_dim"], bg=self.COLORS["bg"], anchor="w",
+        # ── 日志面板（左下角，流程面板下方，半透明乳白背景）──
+        self._bg_canvas.create_rectangle(
+            left_x, 548, left_x + left_w, 670,
+            fill="#f8f4ee", stipple="gray25", outline="#d0cbc4", width=1
         )
-        self.status_label.pack(side=LEFT, fill=X, expand=True)
+        log_outer = Frame(root, bg=self._panel_bg, highlightthickness=0)
+        log_outer.place(x=left_x, y=548, width=left_w, height=122)
 
-        self.clear_btn = self._mkbtn(bottom_bar, " 🗑  清空日志  ",
-                                      "#555", "#666", self._on_clear, font_size=9, padx=10, pady=3)
-        self.clear_btn.pack(side=RIGHT)
+        log_inner = Frame(log_outer, bg=self._panel_bg, padx=2, pady=2)
+        log_inner.pack(fill=BOTH, expand=True, padx=1, pady=1)
 
-        # === 日志栏 ===
-        log_frame = Frame(root, bg="#0a0a14", highlightbackground="#1a1a2e",
-                          highlightthickness=1)
-        log_frame.pack(fill=BOTH, padx=24, pady=(6, 16), ipady=0)
-
-        # 日志标题
-        log_header = Frame(log_frame, bg="#0f0f1a")
+        log_header = Frame(log_inner, bg=self._panel_bg)
         log_header.pack(fill=X)
-        Label(log_header, text="📋 运行日志",
+        Label(log_header, text="  📋 运行日志",
               font=("Microsoft YaHei", 8, "bold"),
-              fg=self.COLORS["text_dim"], bg="#0f0f1a").pack(anchor="w", padx=8, pady=4)
+              fg="#555", bg=self._panel_bg).pack(anchor="sw", padx=8, pady=3)
 
         self.log_text = Text(
-            log_frame,
-            bg=self.COLORS["log_bg"],
-            fg="#a0a0b0",
+            log_inner,
+            bg=self._panel_bg,
+            fg="#444",
             font=("Consolas", 9),
             relief="flat",
             borderwidth=0,
-            padx=10,
-            pady=4,
+            padx=8,
+            pady=2,
             wrap="word",
             state=DISABLED,
-            height=8,
+            height=6,
         )
         self.log_text.pack(fill=BOTH, expand=True)
 
-        # 滚动条
         scrollbar = __import__("tkinter").Scrollbar(self.log_text)
         scrollbar.pack(side=RIGHT, fill=Y)
         self.log_text.config(yscrollcommand=scrollbar.set)
         scrollbar.config(command=self.log_text.yview)
 
-        # 日志 tag
-        self.log_text.tag_config("ok",    foreground="#4caf50")
-        self.log_text.tag_config("warn",  foreground="#ff9800")
-        self.log_text.tag_config("error", foreground="#f44336")
-        self.log_text.tag_config("info",  foreground="#a0a0b0")
+        self.log_text.tag_config("ok",    foreground="#059669")
+        self.log_text.tag_config("warn",  foreground="#d97706")
+        self.log_text.tag_config("error", foreground="#dc2626")
+        self.log_text.tag_config("info",  foreground="#6b7280")
+
+
+
+        self._services_started = False
+        self._monitor_job = None
+        self._fe_monitor_url = "http://127.0.0.1:5173"
 
     def _mkbtn(self, parent, text, color, hover_color, command,
                font_size=12, padx=18, pady=9):
@@ -1168,6 +1189,7 @@ class DeployGUI:
             activeforeground="white", activebackground=hover_color,
             relief="flat", borderwidth=0, cursor="hand2",
             padx=padx, pady=pady, command=command,
+            highlightthickness=0,
         )
 
         def on_enter(e, c=hover_color):
@@ -1175,8 +1197,18 @@ class DeployGUI:
                 e.widget.config(bg=c)
         def on_leave(e, c=color):
             e.widget.config(bg=c)
+
+        def on_press(e):
+            if not self._busy:
+                e.widget.config(pady=pady+2, padx=padx+2)
+        def on_release(e):
+            if not self._busy:
+                e.widget.config(pady=pady, padx=padx)
+
         btn.bind("<Enter>", on_enter)
         btn.bind("<Leave>", on_leave)
+        btn.bind("<ButtonPress>", on_press)
+        btn.bind("<ButtonRelease>", on_release)
         return btn
 
     # ---------- 步骤面板管理 ----------
@@ -1236,12 +1268,13 @@ class DeployGUI:
 
     def set_status(self, text, level="info"):
         color_map = {
-            "success": self.COLORS["deploy"],
-            "fail":    self.COLORS["danger"],
-            "running": self.COLORS["start"],
-            "info":    self.COLORS["text_dim"],
+            "success": "#059669",
+            "fail":    "#dc2626",
+            "running": "#2563eb",
+            "info":    "#6b7280",
         }
-        self.status_label.config(text=text, fg=color_map.get(level, self.COLORS["text_dim"]))
+        if hasattr(self, "status_label") and self.status_label:
+            self.status_label.config(text=text, fg=color_map.get(level, "#6b7280"))
 
     # ---------- 按钮回调 ----------
     def _set_busy(self, busy):
@@ -1407,8 +1440,11 @@ class DeployGUI:
                 pass
             self._monitor_job = None
         # 指示灯恢复灰色
-        self._be_label.config(fg="#444")
-        self._fe_label.config(fg="#444")
+        try:
+            self._bg_canvas.itemconfig(self._be_dot, fill="#444444")
+            self._bg_canvas.itemconfig(self._fe_dot, fill="#444444")
+        except Exception:
+            pass
 
     def _poll_services(self):
         if not self._services_started:
@@ -1441,18 +1477,21 @@ class DeployGUI:
 
     def _update_service_indicators(self, be_alive, fe_alive):
         """更新指示灯颜色"""
-        # 后端
-        if be_alive:
-            self._be_once_running = True
-            self._be_label.config(fg="#4caf50")  # 绿色
-        elif self._be_once_running:
-            self._be_label.config(fg="#f44336")  # 红色（曾运行但崩溃）
-        # 前端
-        if fe_alive:
-            self._fe_once_running = True
-            self._fe_label.config(fg="#4caf50")
-        elif self._fe_once_running:
-            self._fe_label.config(fg="#f44336")
+        try:
+            # 后端
+            if be_alive:
+                self._be_once_running = True
+                self._bg_canvas.itemconfig(self._be_dot, fill="#4caf50")
+            elif self._be_once_running:
+                self._bg_canvas.itemconfig(self._be_dot, fill="#f44336")
+            # 前端
+            if fe_alive:
+                self._fe_once_running = True
+                self._bg_canvas.itemconfig(self._fe_dot, fill="#4caf50")
+            elif self._fe_once_running:
+                self._bg_canvas.itemconfig(self._fe_dot, fill="#f44336")
+        except Exception:
+            pass
 
     def run(self):
         self.root.mainloop()
